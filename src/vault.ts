@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
 import { XChaCha20Poly1305 } from "@stablelib/xchacha20poly1305";
 import argon2 from "argon2";
@@ -24,6 +26,29 @@ const decoder = new TextDecoder();
 function wipe(buf?: Uint8Array): void {
 	if (!buf) return;
 	buf.fill(0);
+}
+
+/** Resolve shell-style paths: `~/`, `~`, `$VAR`, `${VAR}`. */
+function expandPath(input: string): string {
+	let s = input.trim();
+	if (s === "~" || s.startsWith("~/")) {
+		s =
+			s === "~"
+				? os.homedir()
+				: path.join(os.homedir(), s.slice(2));
+	}
+	s = s.replace(
+		/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+		(_m, braced: string | undefined, bare: string | undefined) => {
+			const name = braced ?? bare;
+			if (!name) return "";
+			if (name === "HOME" && process.env.HOME === undefined) {
+				return os.homedir();
+			}
+			return process.env[name] ?? "";
+		},
+	);
+	return path.normalize(s);
 }
 
 function buffersEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -381,6 +406,8 @@ async function main() {
 	} else {
 		console.log(`📄 Using vault: ${path}\n`);
 	}
+
+	path = expandPath(path);
 
 	if (!fs.existsSync(path)) {
 		const create = (await prompt("Vault not found. Create new? (y/N): "))
