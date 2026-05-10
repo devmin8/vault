@@ -31,14 +31,173 @@ function wipe(buf?: Uint8Array): void {
 	buf.fill(0);
 }
 
+/**
+ * Split a single logical CSV “line” for display (no embedded newlines).
+ * Respects double-quoted fields and escaped quotes (`""`). Commas inside quotes are not separators.
+ */
+function splitCsvLineForDisplay(input: string): string[] {
+	const out: string[] = [];
+	let cur = "";
+	let i = 0;
+	let inQuotes = false;
+	while (i < input.length) {
+		const c = input[i];
+		if (c === undefined) break;
+		if (inQuotes) {
+			if (c === '"') {
+				const next = input[i + 1];
+				if (next === '"') {
+					cur += '"';
+					i += 2;
+					continue;
+				}
+				inQuotes = false;
+				i += 1;
+				continue;
+			}
+			cur += c;
+			i += 1;
+			continue;
+		}
+		if (c === '"') {
+			inQuotes = true;
+			i += 1;
+			continue;
+		}
+		if (c === ",") {
+			out.push(cur.trim());
+			cur = "";
+			i += 1;
+			continue;
+		}
+		cur += c;
+		i += 1;
+	}
+	out.push(cur.trim());
+	return out;
+}
+
+/** Key/value rows for display (header row first). Comma-separated values → extra rows, key shown once. */
+function vaultEntryTableRows(entries: [string, string][]): [string, string][] {
+	const rows: [string, string][] = [["Key", "Value"]];
+	for (const [k, value] of entries) {
+		const parts = splitCsvLineForDisplay(value);
+		if (parts.length <= 1) {
+			rows.push([k, value]);
+			continue;
+		}
+		const [first, ...rest] = parts;
+		rows.push([k, first ?? ""]);
+		for (const part of rest) rows.push(["", part]);
+	}
+	return rows;
+}
+
+/** Terminal display width (monospace): wide / fullwidth / emoji clusters count as 2 when typical. */
+function displayCellWidth(s: string): number {
+	let w = 0;
+	for (let i = 0; i < s.length; ) {
+		const cp = s.codePointAt(i);
+		if (cp === undefined) break;
+		const adv = cp > 0xffff ? 2 : 1;
+		const ch = String.fromCodePoint(cp);
+
+		const miscSymbolsEtc =
+			(cp >= 0x1100 && cp <= 0x115f) ||
+			(cp >= 0x231a && cp <= 0x231b) ||
+			(cp >= 0x2329 && cp <= 0x232a) ||
+			(cp >= 0x23e9 && cp <= 0x23ec) ||
+			(cp >= 0x23f0 && cp <= 0x23f3) ||
+			(cp >= 0x25fd && cp <= 0x25fe) ||
+			(cp >= 0x2614 && cp <= 0x2615) ||
+			(cp >= 0x2648 && cp <= 0x2653) ||
+			(cp >= 0x267f && cp <= 0x267f) ||
+			(cp >= 0x2693 && cp <= 0x2693) ||
+			(cp >= 0x26a1 && cp <= 0x26a1) ||
+			(cp >= 0x26aa && cp <= 0x26ab) ||
+			(cp >= 0x26bd && cp <= 0x26be) ||
+			(cp >= 0x26c4 && cp <= 0x26c5) ||
+			(cp >= 0x26ce && cp <= 0x26ce) ||
+			(cp >= 0x26d4 && cp <= 0x26d4) ||
+			(cp >= 0x26ea && cp <= 0x26ea) ||
+			(cp >= 0x26f2 && cp <= 0x26f3) ||
+			(cp >= 0x26f5 && cp <= 0x26f5) ||
+			(cp >= 0x26fa && cp <= 0x26fa) ||
+			(cp >= 0x26fd && cp <= 0x26fd) ||
+			(cp >= 0x2705 && cp <= 0x2705) ||
+			(cp >= 0x270a && cp <= 0x270b) ||
+			(cp >= 0x2728 && cp <= 0x2728) ||
+			(cp >= 0x274c && cp <= 0x274c) ||
+			(cp >= 0x274e && cp <= 0x274e) ||
+			(cp >= 0x2753 && cp <= 0x2755) ||
+			(cp >= 0x2757 && cp <= 0x2757) ||
+			(cp >= 0x2795 && cp <= 0x2797) ||
+			(cp >= 0x27b0 && cp <= 0x27b0) ||
+			(cp >= 0x27bf && cp <= 0x27bf) ||
+			(cp >= 0x2b1b && cp <= 0x2b1c) ||
+			(cp >= 0x2b50 && cp <= 0x2b50) ||
+			(cp >= 0x2b55 && cp <= 0x2b55) ||
+			(cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+			(cp >= 0xac00 && cp <= 0xd7a3) ||
+			(cp >= 0xf900 && cp <= 0xfaff) ||
+			(cp >= 0xfe10 && cp <= 0xfe19) ||
+			(cp >= 0xfe30 && cp <= 0xfe6f) ||
+			(cp >= 0xff00 && cp <= 0xff60) ||
+			(cp >= 0xffe0 && cp <= 0xffe6);
+
+		const wideEmojiPlane = cp >= 0x1f000 && cp <= 0x1ffff;
+
+		w +=
+			miscSymbolsEtc || wideEmojiPlane || /\p{Extended_Pictographic}/u.test(ch)
+				? 2
+				: 1;
+		i += adv;
+	}
+	return w;
+}
+
+function padToDisplayWidth(s: string, targetCols: number): string {
+	const n = displayCellWidth(s);
+	if (n >= targetCols) return s;
+	return s + " ".repeat(targetCols - n);
+}
+
+/**
+ * Two-column grid using `-`, `+`, and `|` (column separator only; no outer `|` on rows).
+ * Uses display width for padding so CJK / emoji don’t break alignment.
+ */
+function renderBorderedTwoColumnTable(
+	rows: ReadonlyArray<readonly [string, string]>,
+): string {
+	if (rows.length === 0) return "";
+	const headRow = rows[0];
+	if (!headRow) return "";
+	const w0 = Math.max(...rows.map((r) => displayCellWidth(r[0])));
+	const w1 = Math.max(...rows.map((r) => displayCellWidth(r[1])));
+	const cellLine = (a: string, b: string) =>
+		`| ${padToDisplayWidth(a, w0)} | ${padToDisplayWidth(b, w1)} |`;
+	const horiz = `+${"-".repeat(w0 + 2)}+${"-".repeat(w1 + 2)}+`;
+
+	const [head0, head1] = headRow;
+	const lines: string[] = [];
+	lines.push(horiz);
+	lines.push(cellLine(head0, head1));
+	lines.push(horiz);
+	for (let i = 1; i < rows.length; i++) {
+		const row = rows[i];
+		if (!row) continue;
+		const [a, b] = row;
+		lines.push(cellLine(a, b));
+	}
+	lines.push(horiz);
+	return lines.join("\n");
+}
+
 /** Resolve shell-style paths: `~/`, `~`, `$VAR`, `${VAR}`. */
 function expandPath(input: string): string {
 	let s = input.trim();
 	if (s === "~" || s.startsWith("~/")) {
-		s =
-			s === "~"
-				? os.homedir()
-				: path.join(os.homedir(), s.slice(2));
+		s = s === "~" ? os.homedir() : path.join(os.homedir(), s.slice(2));
 	}
 	s = s.replace(
 		/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
@@ -490,23 +649,8 @@ async function main() {
 					console.log("\n📭 No entries found");
 				} else {
 					console.log("\n📋 Vault Entries:\n");
-
-					// Calculate column widths
-					const maxKeyLen = Math.max(...entries.map(([k]) => k.length), 3);
-					const maxValLen = Math.max(...entries.map(([, v]) => v.length), 5);
-
-					// Print header
-					const keyHeader = "Key".padEnd(maxKeyLen);
-					const valHeader = "Value".padEnd(maxValLen);
-					console.log(`│ ${keyHeader} │ ${valHeader} │`);
-					console.log(`├${"─".repeat(maxKeyLen + 2)}┼${"─".repeat(maxValLen + 2)}┤`);
-
-					// Print entries
-					entries.forEach(([key, value]) => {
-						const keyCol = key.padEnd(maxKeyLen);
-						const valCol = value.padEnd(maxValLen);
-						console.log(`│ ${keyCol} │ ${valCol} │`);
-					});
+					const rows = vaultEntryTableRows(entries);
+					console.log(renderBorderedTwoColumnTable(rows));
 				}
 			} else if (choice === "5") {
 				data.updatedAt = new Date().toISOString();
