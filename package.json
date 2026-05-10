@@ -1,0 +1,16 @@
+{
+  "name": "vault",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@stablelib/xchacha20poly1305": "^2.0.1",
+    "argon2": "^0.44.0"
+  }
+}
