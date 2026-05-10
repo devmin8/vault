@@ -16,6 +16,9 @@ import type { KdfParams, VaultData } from "./types";
 const MAGIC = new TextEncoder().encode("KVLT");
 const VERSION = 1;
 
+const DEFAULT_VAULT_DIR = ".vault";
+const DEFAULT_STORE_BASENAME = "vault-store.kv";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -49,6 +52,50 @@ function expandPath(input: string): string {
 		},
 	);
 	return path.normalize(s);
+}
+
+function defaultVaultStorePath(): string {
+	return path.join(os.homedir(), DEFAULT_VAULT_DIR, DEFAULT_STORE_BASENAME);
+}
+
+/** True if basename has a typical file extension (e.g. `store.kv`, not `dirname`). */
+function looksLikeFilePath(expanded: string): boolean {
+	const base = path.basename(expanded);
+	const i = base.lastIndexOf(".");
+	return i > 0 && i < base.length - 1;
+}
+
+function stripTrailingSeparators(p: string): string {
+	return p.replace(/[/\\]+$/, "");
+}
+
+/**
+ * Resolve the vault file path from optional user input.
+ * - No input: `~/.vault/vault-store.kv`
+ * - Existing directory: `<dir>/vault-store.kv`
+ * - Trailing separator: `<dir>/vault-store.kv`
+ * - Existing file or non-existent path that looks like a file: use as-is
+ * - Non-existent path without file extension: `<path>/vault-store.kv`
+ */
+function resolveVaultStorePath(userInput: string | undefined): string {
+	const trimmed = userInput?.trim();
+	if (!trimmed) return defaultVaultStorePath();
+
+	const p = expandPath(trimmed);
+	if (/[/\\]$/.test(p)) {
+		const dir = stripTrailingSeparators(p);
+		const base = dir === "" ? path.sep : dir;
+		return path.join(base, DEFAULT_STORE_BASENAME);
+	}
+
+	try {
+		const st = fs.statSync(p);
+		if (st.isDirectory()) return path.join(p, DEFAULT_STORE_BASENAME);
+		return p;
+	} catch {
+		if (looksLikeFilePath(p)) return p;
+		return path.join(p, DEFAULT_STORE_BASENAME);
+	}
 }
 
 function buffersEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -360,7 +407,7 @@ function promptHidden(q: string): Promise<Uint8Array> {
    Init + Main
 ========================= */
 
-async function createVault(path: string): Promise<void> {
+async function createVault(vaultPath: string): Promise<void> {
 	console.log("\n🆕 Creating new vault\n");
 	const pw1 = await promptHidden("🔑 Create master password: ");
 	const pw2 = await promptHidden("🔑 Confirm master password: ");
@@ -392,32 +439,27 @@ async function createVault(path: string): Promise<void> {
 	const enc = encrypt(data, key);
 	wipe(key);
 
-	writeVault(path, kdf, enc.nonce, enc.ciphertext);
+	const dir = path.dirname(vaultPath);
+	fs.mkdirSync(dir, { recursive: true });
+	writeVault(vaultPath, kdf, enc.nonce, enc.ciphertext);
 	console.log("✅ Vault created");
 }
 
 async function main() {
 	console.log("\n🔐 Secure KV Vault\n");
 
-	// Get path from command line args or prompt
-	let path = process.argv[2];
-	if (!path) {
-		path = await prompt("📄 Vault file path: ");
-	} else {
-		console.log(`📄 Using vault: ${path}\n`);
-	}
+	const vaultPath = resolveVaultStorePath(process.argv[2]);
+	console.log(`📄 Using vault: ${vaultPath}\n`);
 
-	path = expandPath(path);
-
-	if (!fs.existsSync(path)) {
+	if (!fs.existsSync(vaultPath)) {
 		const create = (await prompt("Vault not found. Create new? (y/N): "))
 			.toLowerCase()
 			.startsWith("y");
 		if (!create) return;
-		await createVault(path);
+		await createVault(vaultPath);
 	}
 
-	const vault = readVault(path);
+	const vault = readVault(vaultPath);
 	const password = await promptHidden("🔑 Master password: ");
 	let key: Uint8Array | undefined;
 
@@ -469,7 +511,7 @@ async function main() {
 			} else if (choice === "5") {
 				data.updatedAt = new Date().toISOString();
 				const encrypted = encrypt(data, key);
-				writeVault(path, vault.kdf, encrypted.nonce, encrypted.ciphertext);
+				writeVault(vaultPath, vault.kdf, encrypted.nonce, encrypted.ciphertext);
 				console.log("💾 Vault saved & locked");
 				break;
 			}
